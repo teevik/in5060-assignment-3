@@ -28,6 +28,7 @@ from xdf_types import XDFData
 class AnswerRound(BaseModel):
     round_number: int
     latency_applied: int  # Actual latency in milliseconds from LatencyMarkers stream
+    blocks_moved: int  # Number of blocks moved during this round (from BoxBlockMarkers)
     delays_experienced: int  # Answer to "Did you experience delays..."
     task_difficulty: int  # Answer to "How difficult was it..."
     felt_controlling: int  # Answer to "I felt like I was controlling..."
@@ -122,6 +123,49 @@ for _, row in questionnaire_df.iterrows():
                 latency_ms = int(latency_str.replace("ms", ""))
                 latencies_by_round.append(latency_ms)
 
+    # Extract ExpMarkers stream to count block_moved events
+    # Note: Some participants have duplicate ExpMarkers streams (identical events)
+    # We only need to process one of them
+    exp_markers_stream = None
+    for stream in data["streams"]:
+        if stream["info"]["name"] == "ExpMarkers":
+            exp_markers_stream = stream
+            break
+
+    if exp_markers_stream is None:
+        raise ValueError("No ExpMarkers stream found")
+
+    # Count blocks moved per round
+    blocks_moved_by_round = []
+    current_round_blocks = 0
+    in_boxblock = False
+
+    for i, marker in enumerate(exp_markers_stream["time_series"]):
+        marker_str = marker[0]
+
+        # Handle both practice and regular boxblock sessions
+        if marker_str in ["boxblock_start", "practice_boxblock_start"]:
+            # If we were already in a session, save the count first
+            if in_boxblock and marker_str == "boxblock_start":
+                blocks_moved_by_round.append(current_round_blocks)
+            in_boxblock = True
+            current_round_blocks = 0
+        elif marker_str in [
+            "boxblock_stop",
+            "practice_boxblock_stop",
+            "boxblock_end",
+        ]:
+            if in_boxblock:
+                blocks_moved_by_round.append(current_round_blocks)
+                in_boxblock = False
+                current_round_blocks = 0
+        elif marker_str == "block_moved" and in_boxblock:
+            current_round_blocks += 1
+
+    # Ensure we have the right number of block counts
+    while len(blocks_moved_by_round) < num_rounds:
+        blocks_moved_by_round.append(0)
+
     # Parse answer rounds
     rounds = []
     for round_idx in range(num_rounds):
@@ -133,6 +177,9 @@ for _, row in questionnaire_df.iterrows():
             round_number=round_idx + 1,
             latency_applied=latencies_by_round[round_idx]
             if round_idx < len(latencies_by_round)
+            else 0,
+            blocks_moved=blocks_moved_by_round[round_idx]
+            if round_idx < len(blocks_moved_by_round)
             else 0,
             delays_experienced=int(row[f"{repeating_questions[0]}{suffix}"]),
             task_difficulty=int(row[f"{repeating_questions[1]}{suffix}"]),
